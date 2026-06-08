@@ -1,0 +1,1 @@
+{"command": "echo wiring-test <x>", "name": "cs tool wiring test", "description": "verifies the opencode cs_add tool path", "category": "misc", "tags": ["test", "opencode"], "source": "opencode-tool-selftest", "examples": [], "related": [], "needs_review": true, "added": "2026-06-08T15:08:31+01:00", "id": "92d096dabade"}
