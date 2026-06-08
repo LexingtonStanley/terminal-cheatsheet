@@ -1,0 +1,14 @@
+{
+  "_comment": "Merge these into ~/.claude/settings.json under permissions.allow. install-harness.sh does this for you. cs rm / cs edit are deliberately omitted so they keep prompting (humans only).",
+  "permissions": {
+    "allow": [
+      "Bash(cs add:*)",
+      "Bash(cs list:*)",
+      "Bash(cs stats:*)",
+      "Bash(cs check:*)",
+      "Bash(cs render:*)",
+      "Bash(cs import:*)",
+      "Bash(cs lint:*)"
+    ]
+  }
+}
