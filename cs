@@ -533,6 +533,266 @@ def cmd_edit(a) -> int:
     return 0
 
 
+# ── §7 regex validation pass (seed data is untrusted AI output) ──────────
+# Operators that are LITERAL in BRE (plain grep) but operators in ERE (-E).
+# '*' and '.' are operators in BRE too, so they're excluded.
+_ERE_ONLY = "+?{}|()"
+# Known-wrong descriptions from the seed files -> corrected behaviour.
+CORRECTIONS = {
+    "go*ld": "matches 'g' + zero-or-more 'o' + 'ld' — i.e. 'gld','gold','goold'… "
+             "(NOT 'g'/'go'/'goo'; the trailing 'ld' is required)",
+    "colo?r": "ERE only: matches 'colr' or 'color' (optional 'o'). Does NOT match "
+              "'colour' — that needs 'colou?r'.",
+    "colou+r": "ERE only: matches 'colour','colouur'… (one-or-more 'u'). Does NOT "
+               "match 'color'.",
+    "error{2}": "ERE only: 'erro' then exactly two 'r' = 'errorr' (quantifier binds "
+                "to the preceding 'r', not the whole word).",
+    "error{2,}": "ERE only: 'erro' then two-or-more 'r' = 'errorr','errorrr'… "
+                 "(this is 2-OR-MORE, not 'exactly 2').",
+    "error{2,5}": "ERE only: 'erro' then 2 to 5 'r' (binds to preceding 'r').",
+    "error|warn": "ERE only: matches 'error' or 'warn'. In plain grep '|' is literal "
+                  "— use grep -E or escape as \\|.",
+}
+
+
+def first_quoted(s: str) -> str | None:
+    m = re.search(r'"([^"]*)"|\'([^\']*)\'', s)
+    if not m:
+        return None
+    return m.group(1) if m.group(1) is not None else m.group(2)
+
+
+def grep_mode(command: str) -> str | None:
+    """Return 'BRE' | 'ERE' | 'PCRE' | None (not a grep command)."""
+    toks = command.split()
+    if not toks:
+        return None
+    base = toks[0]
+    if base == "egrep":
+        return "ERE"
+    if base != "grep":
+        return None
+    flags = " ".join(toks[1:])
+    if re.search(r"(^|\s)-\w*P|--perl-regexp", flags):
+        return "PCRE"
+    if re.search(r"(^|\s)-\w*E|--extended-regexp", flags):
+        return "ERE"
+    return "BRE"
+
+
+def regex_lint(command: str) -> list[str]:
+    """Return a list of issue strings for a grep command (empty = clean)."""
+    issues = []
+    mode = grep_mode(command)
+    if mode is None:
+        return issues
+    pat = first_quoted(command) or ""
+    if mode == "BRE":
+        # unescaped ERE-only operators in plain grep -> they're LITERAL here
+        stripped = re.sub(r"\\.", "", pat)  # drop escaped pairs
+        bad = sorted({c for c in stripped if c in _ERE_ONLY})
+        if bad:
+            issues.append(
+                f"BRE/ERE: in plain grep the metacharacter(s) {' '.join(bad)} are "
+                f"LITERAL, not operators. Use `grep -E` (or escape them) if you "
+                f"meant them as operators.")
+    if mode == "PCRE":
+        issues.append("portability: `grep -P` (PCRE) is GNU-only — absent on "
+                      "BSD/macOS grep.")
+    if re.search(r"\(\?<?[=!]", pat):
+        issues.append("portability: lookaround requires `grep -P` (GNU-only).")
+    if re.search(r"[*+?]\?", pat):
+        issues.append("portability: lazy/non-greedy quantifiers require `grep -P`.")
+    return issues
+
+
+def apply_validation(e: dict) -> tuple[dict, list[str]]:
+    """Validate/annotate one entry. Returns (entry, list-of-notes-applied)."""
+    notes = []
+    cmd = e.get("command", "")
+    # 1. known-wrong description corrections
+    for key, fix in CORRECTIONS.items():
+        if key in cmd:
+            old = e.get("description", "")
+            if old != fix:
+                e["description"] = fix
+                e["needs_review"] = True
+                notes.append(f"corrected description ({key})")
+            break
+    # 2. regex/portability lint -> gotchas + needs_review
+    for issue in regex_lint(cmd):
+        g = e.get("gotchas")
+        glist = g if isinstance(g, list) else ([g] if g else [])
+        if issue not in glist:
+            glist.append(issue)
+        e["gotchas"] = glist
+        e["needs_review"] = True
+        if issue.startswith("BRE/ERE"):
+            notes.append("flagged BRE/ERE misuse")
+        elif "lookaround" in issue or "PCRE" in issue or "GNU-only" in issue:
+            notes.append("added portability note")
+    return e, notes
+
+
+# ── markdown seed parser ─────────────────────────────────────────────────
+_CMD_HEADS = ("grep", "egrep", "find", "tail", "sed", "awk", "echo", "rsync",
+              "ssh", "scp", "cut", "sort", "uniq", "xargs", "inotifywait", "wc")
+
+
+def parse_markdown(text: str, category: str, source: str) -> list[dict]:
+    """Extract `cmd  # comment` lines (fenced or bare) into entries."""
+    entries = []
+    section = ""
+    seen = set()
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        h = re.match(r"^#{1,6}\s+(.*)", line)
+        if h:
+            section = re.sub(r"^[\d.]+\s*", "", h.group(1)).strip()
+            continue
+        if line.strip().startswith("```") or line.strip().startswith("|"):
+            continue
+        body = line.strip()
+        if not body or not body.split()[0].split("(")[0] in _CMD_HEADS:
+            # also allow indented code lines whose first token is a command
+            if not (body[:1] and body.split() and body.split()[0] in _CMD_HEADS):
+                continue
+        # split command / trailing comment
+        m = re.match(r"^(.*?)\s+#\s*(.+)$", body)
+        if m:
+            command, comment = m.group(1).strip(), m.group(2).strip()
+        else:
+            command, comment = body, section or "command"
+        if command.split()[0] not in _CMD_HEADS:
+            continue
+        if command in seen:
+            continue
+        seen.add(command)
+        name = comment[:60]
+        tags = sorted({command.split()[0]} | {category} |
+                      {f for f in re.findall(r"(?<!\w)-(\w)", command)})
+        entries.append({
+            "command": command,
+            "name": name,
+            "description": comment,
+            "category": category,
+            "tags": [t for t in tags if t],
+            "explanation": f"From '{section}'." if section else "",
+            "source": source,
+        })
+    return entries
+
+
+def cmd_import(a) -> int:
+    fp = Path(a.file)
+    if not fp.exists():
+        die(f"no such file: {fp}", 1)
+    text = fp.read_text()
+    category = a.category or fp.stem
+    src = f"import:{fp.name}"
+    # markdown vs json/jsonl
+    if fp.suffix in (".json", ".jsonl"):
+        raw = [json.loads(x) for x in text.splitlines() if x.strip()] \
+            if fp.suffix == ".jsonl" else json.loads(text)
+        cands = raw if isinstance(raw, list) else [raw]
+        for c in cands:
+            c.setdefault("category", category)
+            c.setdefault("source", src)
+    else:
+        cands = parse_markdown(text, category, src)
+
+    report = ["# cs import review report",
+              f"_source: {fp}  ·  category: {category}  ·  {now_iso()}_", ""]
+    added = corrected = flagged = skipped = 0
+    review_rows = []
+    for c in cands:
+        c = normalize_entry(c)
+        c["needs_review"] = True  # all seed imports are provisional
+        c, notes = apply_validation(c)
+        errs = validate_entry(c)
+        if errs:
+            report.append(f"- ⚠ SKIPPED (invalid): `{c.get('command','')}` — "
+                          f"{'; '.join(errs)}")
+            skipped += 1
+            continue
+        existing, _ = find_entry(c["id"])
+        if existing and not a.force:
+            skipped += 1
+            continue
+        if not a.dry_run:
+            if existing:
+                ents = [x for x in all_entries(c["category"])
+                        if x.get("id") != c["id"]] + [c]
+                rewrite_category(c["category"], ents)
+            else:
+                append_entry(c)
+        added += 1
+        if any("corrected" in n for n in notes):
+            corrected += 1
+        if any("flagged" in n or "portability" in n for n in notes):
+            flagged += 1
+        if notes:
+            review_rows.append(f"- `{c['command']}` → {', '.join(notes)}")
+
+    report += [f"**imported:** {added}  ·  **auto-corrected:** {corrected}  ·  "
+               f"**flagged needs_review:** {flagged}  ·  **skipped(dup/invalid):** "
+               f"{skipped}", ""]
+    if review_rows:
+        report += ["## auto-corrections & flags", ""] + review_rows + [""]
+    rpt_text = "\n".join(report)
+    if a.report:
+        Path(a.report).write_text(rpt_text)
+        print(f"wrote review report: {a.report}")
+    print(f"imported {added} ({corrected} corrected, {flagged} flagged, "
+          f"{skipped} skipped)")
+    if not a.report:
+        print("\n" + rpt_text)
+    if added and not a.dry_run:
+        git_autocommit(f"cs import: {fp.name} (+{added}, {flagged} flagged)")
+    return 0
+
+
+# ── check / lint ─────────────────────────────────────────────────────────
+def cmd_check(a) -> int:
+    rows = all_entries()
+    invalid = [(e, validate_entry(e)) for e in rows]
+    invalid = [(e, errs) for e, errs in invalid if errs]
+    review = [e for e in rows if e.get("needs_review")]
+    print(f"store: {len(rows)} entries · {len(invalid)} invalid · "
+          f"{len(review)} need review")
+    for e, errs in invalid:
+        print(f"  ✗ {e.get('id')} {e.get('command','')}: {'; '.join(errs)}")
+    if a.lint_only or not review:
+        return 1 if invalid else 0
+    if not a.approve:
+        print("\nentries needing review (run `cs check --approve` to clear them "
+              "interactively):")
+        for e in review:
+            print(f"  ⚠ {e.get('id')}  {e.get('command','')}")
+        return 0
+    # interactive approval
+    changed_cats = set()
+    for e in review:
+        print("\n" + entry_md(e))
+        ans = input("[a]pprove / [s]kip / [q]uit > ").strip().lower()
+        if ans == "q":
+            break
+        if ans == "a":
+            e["needs_review"] = False
+            changed_cats.add(e["category"])
+    for cat in changed_cats:
+        ents = all_entries(cat)
+        # merge approvals: rewrite with the in-memory approved flags
+        by_id = {x["id"]: x for x in ents}
+        for e in review:
+            if e["category"] == cat and not e["needs_review"]:
+                by_id[e["id"]] = e
+        rewrite_category(cat, list(by_id.values()))
+    if changed_cats:
+        git_autocommit("cs check: approved entries")
+    return 0
+
+
 # ── argparse ─────────────────────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cs", description="personal command cheatsheet")
@@ -572,6 +832,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     ed = sub.add_parser("edit", help="open entry/category in $EDITOR")
     ed.add_argument("id"); ed.set_defaults(func=cmd_edit)
+
+    im = sub.add_parser("import", help="bulk import a md/json/jsonl file (validated)")
+    im.add_argument("file")
+    im.add_argument("--category", help="override category (default: file stem)")
+    im.add_argument("--report", help="write the review report to this path")
+    im.add_argument("--force", action="store_true", help="overwrite duplicates")
+    im.add_argument("--dry-run", action="store_true", dest="dry_run")
+    im.set_defaults(func=cmd_import)
+
+    ck = sub.add_parser("check", help="validate store; review/approve provisional entries")
+    ck.add_argument("--approve", action="store_true", help="interactively approve")
+    ck.add_argument("--lint-only", action="store_true", dest="lint_only")
+    ck.set_defaults(func=cmd_check)
+    ln = sub.add_parser("lint", help="alias for `cs check --lint-only`")
+    ln.set_defaults(func=cmd_check, approve=False, lint_only=True)
 
     # search (default) — also reachable as `cs search`
     for name in ("search",):

@@ -122,5 +122,51 @@ class CsTest(unittest.TestCase):
         self.assertIn("needs_review: 1", s.stdout)
 
 
+class ValidationTest(unittest.TestCase):
+    """§7 regex validation pass — import the cs module directly."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        loader = SourceFileLoader("cs_mod", CS)  # CS has no .py extension
+        spec = importlib.util.spec_from_loader("cs_mod", loader)
+        cls.m = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.m)
+
+    def test_grep_mode(self):
+        self.assertEqual(self.m.grep_mode('grep "x" f'), "BRE")
+        self.assertEqual(self.m.grep_mode('grep -E "x" f'), "ERE")
+        self.assertEqual(self.m.grep_mode('grep -rn "x" f'), "BRE")
+        self.assertEqual(self.m.grep_mode('grep -P "x" f'), "PCRE")
+        self.assertEqual(self.m.grep_mode("egrep 'x' f"), "ERE")
+        self.assertIsNone(self.m.grep_mode("ls -la"))
+
+    def test_bre_misuse_flagged(self):
+        # plain grep with ERE-only operators -> flagged
+        self.assertTrue(self.m.regex_lint('grep "colo?r" f'))
+        self.assertTrue(self.m.regex_lint('grep "error{2,}" f'))
+        self.assertTrue(self.m.regex_lint('grep "error|warn" f'))
+        # -E version is clean (operators are valid there)
+        self.assertFalse(self.m.regex_lint('grep -E "error|warn" f'))
+        # escaped operators in BRE are fine
+        self.assertFalse(self.m.regex_lint(r'grep "\(error\|warn\)" f'))
+        # '*' and '.' are valid BRE operators -> not flagged
+        self.assertFalse(self.m.regex_lint('grep "go.*ld" f'))
+
+    def test_pcre_portability(self):
+        self.assertTrue(any("GNU-only" in i for i in
+                            self.m.regex_lint('grep -P "(?<=u=)p" f')))
+
+    def test_corrections_applied(self):
+        e = {"command": 'grep "go*ld" f', "name": "n", "description": "WRONG",
+             "category": "regex", "tags": ["g"]}
+        e = self.m.normalize_entry(e)
+        e, notes = self.m.apply_validation(e)
+        self.assertIn("zero-or-more", e["description"])
+        self.assertTrue(e["needs_review"])
+        self.assertTrue(notes)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
