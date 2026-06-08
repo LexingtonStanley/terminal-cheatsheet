@@ -32,6 +32,23 @@ if [ -d "$REPO/.git" ]; then
   git -C "$REPO" config merge.union.driver "true"      2>/dev/null || true
   git -C "$REPO" config rerere.enabled true            2>/dev/null || true
   echo "  ✓ git configured (union merge for data/*.jsonl)"
+
+  # Ensure this clone mirrors its pushes to the GitHub mirror, so no machine
+  # becomes a data island regardless of which remote it was cloned from.
+  # Additive + idempotent: never removes a push URL; re-running is a no-op.
+  GH_MIRROR="https://github.com/LexingtonStanley/terminal-cheatsheet.git"
+  if git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$REPO" remote get-url --push --all origin 2>/dev/null | grep -qxF "$GH_MIRROR"; then
+      # Adding the first explicit pushurl drops the implicit (fetch) one — so if
+      # none is set yet, pin the current fetch URL as a pushurl before adding GH.
+      if [ -z "$(git -C "$REPO" config --get-all remote.origin.pushurl)" ]; then
+        git -C "$REPO" remote set-url --add --push origin \
+          "$(git -C "$REPO" remote get-url origin)" 2>/dev/null || true
+      fi
+      git -C "$REPO" remote set-url --add --push origin "$GH_MIRROR" 2>/dev/null \
+        && echo "  ✓ GitHub mirror added as a push target"
+    fi
+  fi
 fi
 
 # ── 3. daily sync ────────────────────────────────────────────────────────
