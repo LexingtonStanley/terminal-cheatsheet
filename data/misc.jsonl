@@ -1,1 +1,0 @@
-{"command": "echo symlink-test <x>", "name": "symlink load test", "description": "tool loads via repo symlink", "category": "misc", "tags": ["test"], "source": "selftest", "examples": [], "related": [], "needs_review": true, "added": "2026-06-08T15:20:17+01:00", "id": "d308440a65b7"}
