@@ -109,6 +109,25 @@ class CsTest(unittest.TestCase):
         self.assertIn("examples", r.stdout)
         self.assertIn("todos", r.stdout)
 
+    # hidden subcommands (e.g. _dedup) must dispatch, not route to fuzzy search
+    def test_dispatch_hidden_subcommand(self):
+        self.add_basic()
+        r = run(["_dedup"], self.data)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("dedup:", r.stdout)
+
+    # _dedup collapses duplicate lines with the same id (post union-merge)
+    def test_dedup_collapses(self):
+        self.add_basic()
+        # simulate a union-merge duplicate by appending the same line twice
+        fp = self.data / "grep.jsonl"
+        line = fp.read_text().splitlines()[0]
+        with open(fp, "a") as f:
+            f.write(line + "\n")
+        self.assertEqual(len(fp.read_text().splitlines()), 2)
+        run(["_dedup"], self.data)
+        self.assertEqual(len(fp.read_text().splitlines()), 1)
+
     # list marks needs_review entries; stats counts
     def test_list_and_stats(self):
         self.add_basic()

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# cs-sync — reconcile the cheatsheet store with its remotes.
+#
+# This is the ONLY networked piece. `cs` itself never touches the network; it
+# just appends + makes a local commit. cs-sync is run by a systemd --user timer
+# (daily) and once per shell login (throttled). Safe to run anytime / offline
+# (it just no-ops if the remote is unreachable).
+#
+#   pull (union-merge of concurrent appends)  ->  dedup  ->  push to all remotes
+set -uo pipefail
+
+REPO="${CS_HOME:-$HOME/.local/share/cs}"
+CS="$REPO/cs"
+cd "$REPO" 2>/dev/null || exit 0
+[ -d .git ] || exit 0
+
+ts() { date -Iseconds 2>/dev/null || date; }
+log() { [ "${CS_SYNC_QUIET:-}" = "1" ] || echo "cs-sync: $*"; }
+
+# 1. commit any loose local changes so nothing is lost before pulling
+git add -A
+if ! git diff --cached --quiet; then
+  git commit -q -m "cs-sync: local changes $(ts)"
+fi
+
+# 2. pull. Merge (not rebase) so the data/*.jsonl union driver applies to
+#    concurrent appends. --autostash guards any stray working-tree state.
+if git remote get-url origin >/dev/null 2>&1; then
+  if ! git pull --no-rebase --no-edit --autostash origin main 2>/dev/null; then
+    log "pull skipped (remote unreachable or first push pending)"
+  fi
+fi
+
+# 3. dedup any duplicate lines a union merge may have produced, then commit
+if [ -x "$CS" ]; then python3 "$CS" _dedup >/dev/null 2>&1 || true; fi
+git add -A
+git diff --cached --quiet || git commit -q -m "cs-sync: dedup $(ts)"
+
+# 4. push to ALL configured push URLs (lexbox primary + GitHub mirror)
+if git remote get-url origin >/dev/null 2>&1; then
+  if git push origin main 2>/dev/null; then
+    log "pushed to remotes"
+  else
+    log "push skipped (remote unreachable)"
+  fi
+fi
+exit 0

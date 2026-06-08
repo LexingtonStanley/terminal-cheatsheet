@@ -752,6 +752,31 @@ def cmd_import(a) -> int:
     return 0
 
 
+# ── dedup (after a union merge, identical appended lines can duplicate) ──
+def cmd_dedup(a) -> int:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    total = 0
+    for fp in sorted(DATA_DIR.glob("*.jsonl")):
+        if fp.name.startswith("."):
+            continue
+        by_id: dict[str, dict] = {}
+        n = 0
+        for e, _ in iter_entries(fp.stem):
+            n += 1
+            eid = e.get("id") or gen_id(e.get("command", ""), e.get("category", ""))
+            # prefer the approved copy if a dup disagrees on needs_review
+            if eid in by_id and by_id[eid].get("needs_review") and \
+               not e.get("needs_review"):
+                by_id[eid] = e
+            else:
+                by_id.setdefault(eid, e)
+        if len(by_id) != n:
+            rewrite_category(fp.stem, list(by_id.values()))
+            total += n - len(by_id)
+    print(f"dedup: removed {total} duplicate line(s)")
+    return 0
+
+
 # ── check / lint ─────────────────────────────────────────────────────────
 def cmd_check(a) -> int:
     rows = all_entries()
@@ -793,6 +818,15 @@ def cmd_check(a) -> int:
     return 0
 
 
+# ── sync (delegates to cs-sync; the only networked path) ─────────────────
+def cmd_sync(a) -> int:
+    script = REPO / "cs-sync"
+    if not script.exists():
+        die("cs-sync not found next to cs", 1)
+    return subprocess.run(["bash", str(script)], env={**os.environ,
+                          "CS_HOME": str(REPO)}).returncode
+
+
 # ── argparse ─────────────────────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cs", description="personal command cheatsheet")
@@ -826,6 +860,9 @@ def build_parser() -> argparse.ArgumentParser:
     pv = sub.add_parser("_preview", help=argparse.SUPPRESS)
     pv.add_argument("id"); pv.set_defaults(func=cmd_preview)
 
+    dd = sub.add_parser("_dedup", help=argparse.SUPPRESS)
+    dd.set_defaults(func=cmd_dedup)
+
     rm = sub.add_parser("rm", help="soft-delete an entry (humans only)")
     rm.add_argument("id"); rm.add_argument("-y", "--yes", action="store_true")
     rm.set_defaults(func=cmd_rm)
@@ -848,6 +885,9 @@ def build_parser() -> argparse.ArgumentParser:
     ln = sub.add_parser("lint", help="alias for `cs check --lint-only`")
     ln.set_defaults(func=cmd_check, approve=False, lint_only=True)
 
+    sy = sub.add_parser("sync", help="reconcile store with remotes (runs cs-sync)")
+    sy.set_defaults(func=cmd_sync)
+
     # search (default) — also reachable as `cs search`
     for name in ("search",):
         se = sub.add_parser(name, help="fuzzy search")
@@ -862,8 +902,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str]) -> int:
     ensure_config()
     parser = build_parser()
-    known = {"add", "list", "stats", "render", "_preview", "rm", "edit", "search",
-             "import", "check", "lint", "sync", "-h", "--help"}
+    # subcommand names are whatever the parser knows — derived, not hand-listed,
+    # so new subcommands (incl. hidden _ones) never get misrouted to search.
+    sub_action = next((a for a in parser._actions
+                       if isinstance(a, argparse._SubParsersAction)), None)
+    known = set(sub_action.choices) if sub_action else set()
+    known |= {"-h", "--help"}
     # bare `cs` or `cs <query>`/`cs --tag ...` -> search
     if not argv or (argv[0] not in known and not argv[0].startswith("-")) or \
        (argv and argv[0] in ("--tag", "--print")):

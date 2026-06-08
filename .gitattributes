@@ -1,0 +1,5 @@
+# Append-only JSONL: on a merge, take the UNION of both sides instead of
+# raising a conflict. Two machines appending different entries the same day
+# then merge cleanly (line-by-line). `cs-sync` runs `cs _dedup` afterwards to
+# drop any duplicate lines union-merge may have produced.
+data/*.jsonl merge=union
