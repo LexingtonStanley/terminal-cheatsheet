@@ -1,0 +1,10 @@
+// cs integration for Zellij — Alt-/ opens cs in a floating, close-on-exit pane.
+//
+// Add this bind inside the `shared_among "normal" "locked" { ... }` block of
+// your config so it fires even in locked mode and over SSH (same trick as the
+// Alt-y yazi binding). Selecting an entry copies its command to the clipboard.
+//
+//     bind "Alt /" { Run "cs" { floating true; close_on_exit true; }; }
+//
+// (Alt-/ is free: Alt-c is fzf-cd, Alt-y is yazi. For the "insert onto the
+//  command line" flow use the ble.sh Alt-s widget instead — see loki-shell.sh.)
