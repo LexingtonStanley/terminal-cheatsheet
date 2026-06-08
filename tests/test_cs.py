@@ -116,6 +116,31 @@ class CsTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("dedup:", r.stdout)
 
+    # _lines / _cycle back the in-fzf category cycler (Alt-c / Alt-a)
+    def test_category_cycler(self):
+        self.add_basic(command="grep -rn <pat> .", category="grep")
+        self.add_basic(command="find . -name <glob>", category="linux")
+        # _lines (all) shows both categories; --category scopes to one file
+        all_lines = run(["_lines"], self.data).stdout
+        self.assertIn("grep", all_lines)
+        self.assertIn("linux", all_lines)
+        only_grep = run(["_lines", "--category", "grep"], self.data).stdout
+        self.assertIn("grep", only_grep)
+        self.assertNotIn("find .", only_grep)
+        # _cycle with no prompt advances *all* -> first category (sorted: grep)
+        first = run(["_cycle"], self.data).stdout
+        self.assertIn("_lines --category grep", first)
+        self.assertIn("change-prompt(cs[grep]", first)
+        # from grep it advances to the next category (linux)
+        nxt = run(["_cycle"], self.data,
+                  env={"FZF_PROMPT": "cs[grep] ❯ "}).stdout
+        self.assertIn("_lines --category linux", nxt)
+        # from the last category it wraps back to the unfiltered list
+        wrap = run(["_cycle"], self.data,
+                   env={"FZF_PROMPT": "cs[linux] ❯ "}).stdout
+        self.assertIn("change-prompt(cs ❯ )", wrap)
+        self.assertNotIn("--category", wrap)
+
     # _dedup collapses duplicate lines with the same id (post union-merge)
     def test_dedup_collapses(self):
         self.add_basic()

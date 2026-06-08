@@ -15,6 +15,8 @@ cs                       # fuzzy-search everything; Enter copies the command
 cs grep                  # scope to a category
 cs --tag ssh             # scope to a tag
 cs <anything>            # pre-seed the search query
+#   inside the picker:  Alt-c cycles category filter · Alt-a back to all
+#                       Ctrl-/ toggles the preview
 
 cs add --command 'grep -rn <pat> <dir>' --name 'recursive grep' \
        --desc 'search recursively with line numbers' \

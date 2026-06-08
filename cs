@@ -422,41 +422,86 @@ def copy_to_clipboard(text: str) -> bool:
 
 
 # ── search (fzf) ─────────────────────────────────────────────────────────
-def fzf_pick(rows: list[dict], query: str | None) -> dict | None:
+def entry_line(e: dict) -> str:
+    """One `id \\t shown` row for the fzf list (used by stdin AND _lines reload)."""
+    flag = "⚠ " if e.get("needs_review") else ""
+    # id \t shown(category │ name ⟶ command)
+    shown = f"{flag}{e.get('category',''):>8} │ {e.get('name','')}  ⟶  {e.get('command','')}"
+    return f"{e['id']}\t{shown}"
+
+
+def build_lines(rows: list[dict]) -> str:
+    return "\n".join(entry_line(e) for e in rows)
+
+
+def store_categories() -> list[str]:
+    """Sorted list of category names that currently have entries."""
+    return sorted({e.get("category", "") for e in all_entries() if e.get("category")})
+
+
+def fzf_pick(rows: list[dict], query: str | None, category: str | None = None) -> dict | None:
     if not rows:
         eprint("cs: no entries yet — add some with `cs add` or `cs import`")
         return None
     if not have("fzf"):
         die("fzf not found — install fzf for interactive search", 3)
-    self_exe = str(Path(__file__).resolve())
-    lines = []
-    for e in rows:
-        flag = "⚠ " if e.get("needs_review") else ""
-        # id \t shown(category | name | command)
-        shown = f"{flag}{e.get('category',''):>8} │ {e.get('name','')}  ⟶  {e.get('command','')}"
-        lines.append(f"{e['id']}\t{shown}")
+    self_exe = json_q(str(Path(__file__).resolve()))
+    prompt = f"cs[{category}] ❯ " if category else "cs ❯ "
     cfg = load_config()
     fzf = [
         "fzf", "--ansi", "--delimiter", "\t", "--with-nth", "2..",
         "--height=90%", "--layout=reverse", "--border=rounded", "--info=inline",
-        "--prompt", "cs ❯ ", "--pointer", "▶",
-        "--preview", f"{json_q(self_exe)} _preview {{1}}",
+        "--prompt", prompt, "--pointer", "▶",
+        "--preview", f"{self_exe} _preview {{1}}",
         "--preview-window", "right:62%:wrap",
-        "--header", "enter: copy cmd · alt-e: copy 1st example · ctrl-/: toggle preview",
+        "--header", "enter: copy · alt-c: cycle category · alt-a: all · ctrl-/: preview",
         "--bind", "ctrl-/:toggle-preview",
+        # category cycler: _cycle reads $FZF_PROMPT and emits reload+change-prompt;
+        # alt-a jumps straight back to the unfiltered list.
+        "--bind", f"alt-c:transform:{self_exe} _cycle",
+        "--bind", f"alt-a:reload({self_exe} _lines)+change-prompt(cs ❯ )",
     ]
     if query:
         fzf += ["--query", query]
     if cfg.get("fzf_opts"):
         fzf += cfg["fzf_opts"].split()
     env = dict(os.environ)
-    p = subprocess.run(fzf, input="\n".join(lines), text=True, capture_output=True,
+    p = subprocess.run(fzf, input=build_lines(rows), text=True, capture_output=True,
                        env=env)
     if p.returncode != 0 or not p.stdout.strip():
         return None
     sel_id = p.stdout.strip().split("\t", 1)[0]
     e, _ = find_entry(sel_id)
     return e
+
+
+# ── hidden helpers backing the in-fzf category cycler ────────────────────
+def cmd_lines(a) -> int:
+    """Print the fzf list for all entries (or one --category). Used by reload()."""
+    sys.stdout.write(build_lines(all_entries(a.category)))
+    return 0
+
+
+def cmd_cycle(a) -> int:
+    """Emit an fzf action string advancing the picker to the next category.
+
+    Stateless: the *current* category is recovered from $FZF_PROMPT (set by
+    fzf for transform actions), so no temp files or shared state survive across
+    reloads. Order is *all* → each category (sorted) → wrap.
+    """
+    order = ["*all*"] + store_categories()
+    prompt = os.environ.get("FZF_PROMPT", "")
+    m = re.search(r"cs\[([^\]]+)\]", prompt)
+    cur = m.group(1) if m else "*all*"
+    idx = order.index(cur) if cur in order else 0
+    nxt = order[(idx + 1) % len(order)]
+    exe = json_q(str(Path(__file__).resolve()))
+    if nxt == "*all*":
+        sys.stdout.write(f"reload({exe} _lines)+change-prompt(cs ❯ )")
+    else:
+        sys.stdout.write(f"reload({exe} _lines --category {nxt})"
+                         f"+change-prompt(cs[{nxt}] ❯ )")
+    return 0
 
 
 def json_q(s: str) -> str:
@@ -475,7 +520,7 @@ def cmd_search(a) -> int:
         category, query = query, None
     else:
         rows = all_entries()
-    e = fzf_pick(rows, query)
+    e = fzf_pick(rows, query, category)
     if not e:
         return 130  # cancelled
     cmd = e.get("command", "")
@@ -862,6 +907,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     dd = sub.add_parser("_dedup", help=argparse.SUPPRESS)
     dd.set_defaults(func=cmd_dedup)
+
+    lf = sub.add_parser("_lines", help=argparse.SUPPRESS)
+    lf.add_argument("--category"); lf.set_defaults(func=cmd_lines)
+
+    cy = sub.add_parser("_cycle", help=argparse.SUPPRESS)
+    cy.set_defaults(func=cmd_cycle)
 
     rm = sub.add_parser("rm", help="soft-delete an entry (humans only)")
     rm.add_argument("id"); rm.add_argument("-y", "--yes", action="store_true")
