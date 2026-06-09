@@ -823,6 +823,52 @@ def cmd_dedup(a) -> int:
 
 
 # ── check / lint ─────────────────────────────────────────────────────────
+def fzf_approve(review: list[dict]) -> list[str]:
+    """fzf multi-select picker for clearing needs_review entries — same look as
+    `cs` search, with the preview pane. Tab marks entries, ctrl-a marks all,
+    ctrl-d clears marks, Enter approves the marked set (or the highlighted row if
+    none are marked), Esc cancels. Returns the selected ids ([] on cancel)."""
+    self_exe = json_q(str(Path(__file__).resolve()))
+    fzf = [
+        "fzf", "--ansi", "--multi", "--delimiter", "\t", "--with-nth", "2..",
+        "--height=90%", "--layout=reverse", "--border=rounded", "--info=inline",
+        "--prompt", "approve ❯ ", "--pointer", "▶", "--marker", "✓ ",
+        "--preview", f"{self_exe} _preview {{1}}",
+        "--preview-window", "right:62%:wrap",
+        "--header", ("tab: mark · ctrl-a: all · ctrl-d: none · "
+                     "enter: approve marked (else highlighted) · esc: cancel"),
+        "--bind", "ctrl-/:toggle-preview",
+        "--bind", "ctrl-a:select-all",
+        "--bind", "ctrl-d:deselect-all",
+    ]
+    cfg = load_config()
+    if cfg.get("fzf_opts"):
+        fzf += cfg["fzf_opts"].split()
+    p = subprocess.run(fzf, input=build_lines(review), text=True,
+                       capture_output=True)
+    if p.returncode not in (0, 1) or not p.stdout.strip():
+        return []
+    return [ln.split("\t", 1)[0] for ln in p.stdout.strip().splitlines() if ln.strip()]
+
+
+def _commit_approvals(approved: list[dict]) -> int:
+    """Clear needs_review on the given entries, persist per-category, commit."""
+    changed_cats = {e["category"] for e in approved}
+    for e in approved:
+        e["needs_review"] = False
+    for cat in changed_cats:
+        by_id = {x["id"]: x for x in all_entries(cat)}
+        for e in approved:
+            if e["category"] == cat:
+                by_id[e["id"]] = e
+        rewrite_category(cat, list(by_id.values()))
+    if changed_cats:
+        git_autocommit("cs check: approved entries")
+    n = len(approved)
+    print(f"approved {n} entr{'y' if n == 1 else 'ies'} ✓" if n else "no entries approved.")
+    return n
+
+
 def cmd_check(a) -> int:
     rows = all_entries()
     invalid = [(e, validate_entry(e)) for e in rows]
@@ -833,33 +879,38 @@ def cmd_check(a) -> int:
     for e, errs in invalid:
         print(f"  ✗ {e.get('id')} {e.get('command','')}: {'; '.join(errs)}")
     if a.lint_only or not review:
+        if not review and not a.lint_only:
+            print("nothing needs review ✓")
         return 1 if invalid else 0
+
+    # Default approval path = fzf multi-select picker (same UX as `cs` search),
+    # whenever fzf is present and we're attached to a real terminal. No --approve
+    # flag needed — `cs check` just opens the picker.
+    if have("fzf") and sys.stdin.isatty() and sys.stdout.isatty():
+        ids = set(fzf_approve(review))
+        _commit_approvals([e for e in review if e["id"] in ids])
+        return 0
+
+    # Fallbacks for no-fzf / non-tty (e.g. piped). `--approve` runs the simple
+    # text loop; otherwise just list what's pending.
     if not a.approve:
-        print("\nentries needing review (run `cs check --approve` to clear them "
-              "interactively):")
+        print("\nentries needing review (run `cs check` in a terminal for the "
+              "fzf picker, or `cs check --approve` for a text prompt):")
         for e in review:
             print(f"  ⚠ {e.get('id')}  {e.get('command','')}")
         return 0
-    # interactive approval
-    changed_cats = set()
+    approved = []
     for e in review:
         print("\n" + entry_md(e))
-        ans = input("[a]pprove / [s]kip / [q]uit > ").strip().lower()
-        if ans == "q":
+        try:
+            ans = input("[a]pprove / [s]kip / [q]uit > ").strip().lower()
+        except EOFError:
             break
-        if ans == "a":
-            e["needs_review"] = False
-            changed_cats.add(e["category"])
-    for cat in changed_cats:
-        ents = all_entries(cat)
-        # merge approvals: rewrite with the in-memory approved flags
-        by_id = {x["id"]: x for x in ents}
-        for e in review:
-            if e["category"] == cat and not e["needs_review"]:
-                by_id[e["id"]] = e
-        rewrite_category(cat, list(by_id.values()))
-    if changed_cats:
-        git_autocommit("cs check: approved entries")
+        if ans in ("q", "quit"):
+            break
+        if ans in ("a", "approve", "y", "yes"):
+            approved.append(e)
+    _commit_approvals(approved)
     return 0
 
 
@@ -929,8 +980,9 @@ def build_parser() -> argparse.ArgumentParser:
     im.add_argument("--dry-run", action="store_true", dest="dry_run")
     im.set_defaults(func=cmd_import)
 
-    ck = sub.add_parser("check", help="validate store; review/approve provisional entries")
-    ck.add_argument("--approve", action="store_true", help="interactively approve")
+    ck = sub.add_parser("check", help="validate store; approve provisional entries (fzf picker)")
+    ck.add_argument("--approve", action="store_true",
+                    help="text-prompt approval (used only when no fzf / not a tty)")
     ck.add_argument("--lint-only", action="store_true", dest="lint_only")
     ck.set_defaults(func=cmd_check)
     ln = sub.add_parser("lint", help="alias for `cs check --lint-only`")
