@@ -66,7 +66,7 @@ def load_config() -> dict:
         try:
             import tomllib
 
-            cfg = tomllib.loads(CONFIG_FILE.read_text())
+            cfg = tomllib.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except Exception as e:  # noqa: BLE001
             eprint(f"cs: warning: bad config {CONFIG_FILE}: {e}")
     return cfg
@@ -81,7 +81,8 @@ def ensure_config() -> None:
         '# clipboard = "xclip"   # override autodetect: xclip|xsel|wl-copy|pbcopy|clip.exe\n'
         '# bat_theme = "ansi"    # bat preview theme\n'
         "# fzf_opts  = \"\"        # extra fzf flags\n"
-        "auto_commit = true       # local git commit after add/import/rm\n"
+        "auto_commit = true       # local git commit after add/import/rm\n",
+        encoding="utf-8",
     )
 
 
@@ -101,7 +102,7 @@ def iter_entries(category: str | None = None):
     for fp in files:
         if not fp.exists():
             continue
-        for ln, line in enumerate(fp.read_text().splitlines(), 1):
+        for ln, line in enumerate(fp.read_text(encoding="utf-8").splitlines(), 1):
             line = line.strip()
             if not line:
                 continue
@@ -366,7 +367,7 @@ def cmd_render(a) -> int:
         parts.append("\n---\n")
     md = "\n".join(parts)
     if a.out:
-        Path(a.out).write_text(md)
+        Path(a.out).write_text(md, encoding="utf-8")
         print(f"wrote {a.out} ({len(rows)} entries)")
     else:
         sys.stdout.write(md)
@@ -732,7 +733,7 @@ def cmd_import(a) -> int:
     fp = Path(a.file)
     if not fp.exists():
         die(f"no such file: {fp}", 1)
-    text = fp.read_text()
+    text = fp.read_text(encoding="utf-8")
     category = a.category or fp.stem
     src = f"import:{fp.name}"
     # markdown vs json/jsonl
@@ -786,7 +787,7 @@ def cmd_import(a) -> int:
         report += ["## auto-corrections & flags", ""] + review_rows + [""]
     rpt_text = "\n".join(report)
     if a.report:
-        Path(a.report).write_text(rpt_text)
+        Path(a.report).write_text(rpt_text, encoding="utf-8")
         print(f"wrote review report: {a.report}")
     print(f"imported {added} ({corrected} corrected, {flagged} flagged, "
           f"{skipped} skipped)")
@@ -1003,6 +1004,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
+    # Windows consoles default to a legacy code page (e.g. cp1252); force UTF-8 on
+    # our streams so unicode in entries/preview prints instead of crashing. The
+    # data files are read/written with explicit encoding="utf-8" everywhere.
+    if sys.platform == "win32":
+        for _s in (sys.stdout, sys.stderr):
+            try: _s.reconfigure(encoding="utf-8")
+            except Exception: pass
     ensure_config()
     parser = build_parser()
     # subcommand names are whatever the parser knows — derived, not hand-listed,
